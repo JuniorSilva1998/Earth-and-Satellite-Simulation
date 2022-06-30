@@ -1,0 +1,1117 @@
+<!DOCTYPE HTML>
+<html lang="en">
+<head>
+<title>up806612</title>
+<meta charset="utf-8">
+
+<script src="webgl-debug.js"></script>
+<script type="text/javascript" src="glMatrix.js"></script>
+<script src="webgl-utils.js"></script>
+
+<script id="shader-vs" type="x-shader/x-vertex">
+attribute vec4 aVertexColor;
+attribute vec3 aVertexPosition;
+attribute vec3 aVertexNormal;
+attribute vec2 aTextureCoordinates;
+
+uniform mat4 uMVMatrix;
+uniform mat4 uPMatrix;
+uniform mat3 uNMatrix;
+
+varying vec2 vTextureCoordinates;
+varying vec3 vNormalEye;
+varying vec3 vPositionEye3;
+varying vec4 vColor;
+
+void main() {
+	// Get vertex position in eye coordinates and send to the fragment 
+	// shader.
+	vec4 vertexPositionEye4 = uMVMatrix * vec4(aVertexPosition, 1.0);
+	vPositionEye3 = vertexPositionEye4.xyz / vertexPositionEye4.w;
+  
+	// Transform the normal to eye coordinates and send to fragment shader.
+	vNormalEye = normalize(uNMatrix * aVertexNormal);
+  
+	// Transform the geometry.
+	gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+	vTextureCoordinates = aTextureCoordinates;
+	vColor = aVertexColor;
+}         
+</script>  
+
+<script id="shader-fs" type="x-shader/x-fragment">
+precision mediump float;
+
+varying vec2 vTextureCoordinates;
+varying vec3 vNormalEye;
+varying vec3 vPositionEye3;
+varying vec4 vColor;
+
+uniform vec3 uAmbientLightColor;
+uniform vec3 uDiffuseLightColor;
+uniform vec3 uSpecularLightColor;
+uniform vec3 uLightPosition;
+uniform vec3 uSpotDirection;
+uniform sampler2D uSampler;
+
+const float shininess = 32.0;
+const float spotExponent = 40.0;
+// the cosine of the cutoff angle of spot light.
+const float spotCosCutoff = 0.97; // corresponds to 14 degrees.
+
+vec3 lightWeighting = vec3(0.0, 0.0, 0.0);
+
+void main() {
+	// Calculate the vector (L) to the light source. 
+	vec3 vectorToLightSource = normalize(uLightPosition - vPositionEye3);
+
+	// Calculate N dot L for diffuse lighting.
+	float diffuseLightWeighting = max(dot(vNormalEye,
+	vectorToLightSource), 0.0);
+
+	// We only do lighting calculation when the weight for diffuse and 
+	// specular reflection is non-zero – this is the case when a fragment 
+	// is outside of the light cone of the spotlight.
+
+	if (diffuseLightWeighting > 0.0) {
+    	
+		// Calculate the intensity of spot light in the direction of 
+		// vectorToLightSource.
+		float spotEffect = dot(normalize(uSpotDirection),
+    				normalize(-vectorToLightSource));
+	
+		// Check that we are inside the spot light cone – compare their 
+		// cosine values.
+		if (spotEffect > spotCosCutoff) {
+			spotEffect = pow(spotEffect, spotExponent);
+	
+			// Calculate the reflection vector (R) needed for specular 
+			// light.
+			vec3 reflectionVector = normalize(reflect(-
+					vectorToLightSource,vNormalEye));
+
+			// Calculate view vector (V) in eye coordinates as
+			// (0.0, 0.0, 0.0) - vPositionEye3.
+			vec3 viewVectorEye = -normalize(vPositionEye3);
+			float rdotv = max(dot(reflectionVector, viewVectorEye), 0.0);
+			float specularLightWeighting = pow(rdotv, shininess);
+			lightWeighting =
+		    spotEffect * uDiffuseLightColor * diffuseLightWeighting +
+		    spotEffect * uSpecularLightColor * specularLightWeighting;
+		}
+	}
+  
+	// Always add the ambient light.
+	lightWeighting += uAmbientLightColor;
+  
+	vec4 texelColor = texture2D(uSampler, vTextureCoordinates);
+  
+	// Modulate texel color with lightweigthing and write as final color.
+	gl_FragColor = vec4(lightWeighting.rgb * texelColor.rgb, texelColor.a);
+} 
+
+</script>
+
+<script type="text/javascript">
+// Globals
+var gl;
+var pwgl = {}; // Many variables are added to this as properties.
+pwgl.ongoingImageLoads = [];
+var canvas;
+
+// Varibales for interactive control.
+var transX = 0, transY = 0, transZ=0;
+var xRot =yRot =zRot =xOffs = yOffs = drag = 0;
+pwgl.listOfPressedKeys = []; // Keep track of pressed down keys in a list.
+
+
+function createGLContext(canvas) {
+	var names = ["webgl", "experimental-webgl"];
+	var context = null;
+	for (var i=0; i < names.length; i++) {
+		try {
+			context = canvas.getContext(names[i]);
+		} catch(e) {}
+		if (context) {
+			break;
+		}
+	}
+	if (context) {
+		context.viewportWidth = canvas.width;
+		context.viewportHeight = canvas.height;
+	} else {
+		alert("Failed to create WebGL context!");
+	}
+	return context;
+}
+
+function loadShaderFromDOM(id) {
+	var shaderScript = document.getElementById(id);
+	// If the element with the specified id is not found, exit.
+	if (!shaderScript) {
+		return null;
+	}
+
+	// Loop through the children for the found DOM element and 
+	// build up the shader source code as a string.
+	var shaderSource = "";
+	var currentChild = shaderScript.firstChild;
+	while (currentChild) {
+		if (currentChild.nodeType == 3) { // 3 corresponds to TEXT_NODE.
+			shaderSource += currentChild.textContent;
+		}
+		currentChild = currentChild.nextSibling;
+	}
+
+	var shader;
+	if (shaderScript.type == "x-shader/x-fragment") {
+		shader = gl.createShader(gl.FRAGMENT_SHADER);
+	} else if (shaderScript.type == "x-shader/x-vertex") {
+		shader = gl.createShader(gl.VERTEX_SHADER);
+	} else {
+		return null;
+	}
+
+	gl.shaderSource(shader, shaderSource);
+	gl.compileShader(shader);
+	if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS) 	
+				&&!gl.isContextLost()) {
+		alert("compiler!!!!!!")
+		alert(gl.getShaderInfoLog(shader));
+		return null;
+	} 
+	return shader;
+}
+
+function setupShaders() {
+	var vertexShader = loadShaderFromDOM("shader-vs");
+	var fragmentShader = loadShaderFromDOM("shader-fs");
+	var shaderProgram = gl.createProgram();
+	gl.attachShader(shaderProgram, vertexShader);
+	gl.attachShader(shaderProgram, fragmentShader);
+	gl.linkProgram(shaderProgram);
+
+	if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS) 
+	&&!gl.isContextLost()) {
+		alert("Failed to link shaders: " + 
+		gl.getProgramInfoLog(shaderProgram));
+	}
+
+	gl.useProgram(shaderProgram);
+
+	pwgl.vertexPositionAttributeLoc = gl.getAttribLocation(shaderProgram, 
+	"aVertexPosition");  
+	pwgl.vertexTextureAttributeLoc = gl.getAttribLocation(shaderProgram, 
+	"aTextureCoordinates");
+	pwgl.uniformMVMatrixLoc = gl.getUniformLocation(shaderProgram, 
+	"uMVMatrix");
+	pwgl.uniformProjMatrixLoc = gl.getUniformLocation(shaderProgram, 
+	"uPMatrix");
+	pwgl.uniformSamplerLoc = gl.getUniformLocation(shaderProgram, 
+	"uSampler");
+
+	pwgl.uniformNormalMatrixLoc = gl.getUniformLocation(shaderProgram, 
+	"uNMatrix"); 
+	pwgl.vertexNormalAttributeLoc = gl.getAttribLocation(shaderProgram, 
+	"aVertexNormal");
+	pwgl.uniformLightPositionLoc =gl.getUniformLocation(shaderProgram, 
+	"uLightPosition");
+	pwgl.uniformSpotDirectionLoc =
+	gl.getUniformLocation(shaderProgram, 
+	"uSpotDirection"); 
+	pwgl.uniformAmbientLightColorLoc = gl.getUniformLocation(shaderProgram, 
+	"uAmbientLightColor");  
+	pwgl.uniformDiffuseLightColorLoc = gl.getUniformLocation(shaderProgram, 
+	"uDiffuseLightColor");
+	pwgl.uniformSpecularLightColorLoc = gl.getUniformLocation(shaderProgram, 
+	"uSpecularLightColor");
+
+	gl.enableVertexAttribArray(pwgl.vertexNormalAttributeLoc);
+	gl.enableVertexAttribArray(pwgl.vertexPositionAttributeLoc);
+	gl.enableVertexAttribArray(pwgl.vertexTextureAttributeLoc);
+
+	pwgl.modelViewMatrix = mat4.create(); 
+	pwgl.projectionMatrix = mat4.create();
+	pwgl.modelViewMatrixStack = [];
+}
+
+function pushModelViewMatrix() {
+	var copyToPush = mat4.create(pwgl.modelViewMatrix);
+	pwgl.modelViewMatrixStack.push(copyToPush);
+}
+
+function popModelViewMatrix() {
+	if (pwgl.modelViewMatrixStack.length == 0) {
+		throw "Error popModelViewMatrix() - Stack was empty ";
+	}
+	pwgl.modelViewMatrix = pwgl.modelViewMatrixStack.pop();
+}
+
+function setupSatelliteBuffers() {
+	pwgl.satelliteVertexPositionBuffer = gl.createBuffer();
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.satelliteVertexPositionBuffer);
+	var satelliteVertexPosition = [
+		// Front face
+		 1.0,  1.0,  1.0, //v0
+		-1.0,  1.0,  1.0, //v1
+		-1.0, -1.0,  1.0, //v2
+		 1.0, -1.0,  1.0, //v3
+
+		// Back face
+		 1.0,  1.0, -1.0, //v4
+		-1.0,  1.0, -1.0, //v5
+		-1.0, -1.0, -1.0, //v6
+		 1.0, -1.0, -1.0, //v7
+
+		// Left face
+		-1.0,  1.0,  1.0, //v8
+		-1.0,  1.0, -1.0, //v9
+		-1.0, -1.0, -1.0, //v10
+		-1.0, -1.0,  1.0, //v11
+
+		// Right face
+		 1.0,  1.0,  1.0, //v12
+		 1.0, -1.0,  1.0, //v13
+		 1.0, -1.0, -1.0, //v14
+		 1.0,  1.0, -1.0, //v15
+
+		// Top face
+         1.0,  1.0,  1.0, //v16
+         1.0,  1.0, -1.0, //v17
+		-1.0,  1.0, -1.0, //v18
+		-1.0,  1.0,  1.0, //v19
+
+        // Bottom face
+         1.0, -1.0,  1.0, //v20
+         1.0, -1.0, -1.0, //v21
+		-1.0, -1.0, -1.0, //v22
+		-1.0, -1.0,  1.0, //v23
+		
+		// Left Rod Front
+		-1.0,  0.1,  0.1, //v24
+		-1.5,  0.1,  0.1, //v25
+		-1.5, -0.1,  0.1, //v26
+		-1.0, -0.1,  0.1,  //v27
+		
+		// Left Rod Back
+		-1.0,  0.1, -0.1, //v28
+		-1.5,  0.1, -0.1, //v29
+		-1.5, -0.1, -0.1, //v30
+		-1.0, -0.1, -0.1,  //v31
+		
+		// Left Rod Top
+		-1.0,  0.1,  0.1, //v32
+		-1.5,  0.1,  0.1, //v33
+		-1.5,  0.1, -0.1, //v34
+		-1.0,  0.1, -0.1,  //v35
+		
+		// Left Rod Bottom
+		-1.0, -0.1,  0.1, //v36
+		-1.5, -0.1,  0.1, //v37
+		-1.5, -0.1, -0.1, //v38
+		-1.0, -0.1, -0.1,  //v39
+		
+		// Right Rod Front
+		 1.0,  0.1,  0.1, //v40
+		 1.5,  0.1,  0.1, //v41
+		 1.5, -0.1,  0.1, //v42
+		 1.0, -0.1,  0.1,  //v43
+		
+		// Right Rod Back
+		 1.0,  0.1, -0.1, //v44
+		 1.5,  0.1, -0.1, //v45
+		 1.5, -0.1, -0.1, //v46
+		 1.0, -0.1, -0.1,  //v47
+		
+		// Right Rod Top
+		 1.0,  0.1,  0.1, //v48
+		 1.5,  0.1,  0.1, //v49
+		 1.5,  0.1, -0.1, //v50
+		 1.0,  0.1, -0.1,  //v51
+		
+		// Right Rod Bottom
+		 1.0, -0.1,  0.1, //v52
+		 1.5, -0.1,  0.1, //v53
+		 1.5, -0.1, -0.1, //v54
+		 1.0, -0.1, -0.1,  //v55
+		 
+		// Left Panel Front
+		-1.5,  0.1,  0.5, //v56
+		-2.5,  0.1,  0.5, //v57
+		-2.5, -0.1,  0.5, //v58
+		-1.5, -0.1,  0.5, //v59
+
+		// Left Panel Back
+		-1.5,  0.1, -0.5, //v60
+		-2.5,  0.1, -0.5, //v61
+		-2.5, -0.1, -0.5, //v62
+		-1.5, -0.1, -0.5, //v63
+
+		// Left Panel Left
+		-2.5,  0.1,  0.5, //v64
+		-2.5,  0.1, -0.5, //v65
+		-2.5, -0.1, -0.5, //v66
+		-2.5, -0.1,  0.5, //v67
+
+		// Left Panel Right
+		-1.5,  0.1,  0.5, //v68
+		-1.5, -0.1,  0.5, //v69
+		-1.5, -0.1, -0.5, //v70
+		-1.5,  0.1, -0.5, //v71
+
+		// Left Panel Top
+        -1.5,  0.1,  0.5, //v72
+        -1.5,  0.1, -0.5, //v73
+		-2.5,  0.1, -0.5, //v74
+		-2.5,  0.1,  0.5, //v75
+
+        // Left Panel Bottom
+        -1.5, -0.1,  0.5, //v76
+        -1.5, -0.1, -0.5, //v77
+		-2.5, -0.1, -0.5, //v78
+		-2.5, -0.1,  0.5, //v79
+		
+		// Right Panel Front
+		 1.5,  0.1,  0.5, //v80
+		 2.5,  0.1,  0.5, //v81
+		 2.5, -0.1,  0.5, //v82
+		 1.5, -0.1,  0.5, //v83
+
+		// Right Panel Back
+		 1.5,  0.1, -0.5, //v84
+		 2.5,  0.1, -0.5, //v85
+		 2.5, -0.1, -0.5, //v86
+		 1.5, -0.1, -0.5, //v87
+
+		// Right Panel Left
+		 2.5,  0.1,  0.5, //v88
+		 2.5,  0.1, -0.5, //v89
+		 2.5, -0.1, -0.5, //v90
+		 2.5, -0.1,  0.5, //v91
+
+		// Right Panel Right
+		 1.5,  0.1,  0.5, //v92
+		 1.5, -0.1,  0.5, //v93
+		 1.5, -0.1, -0.5, //v94
+		 1.5,  0.1, -0.5, //v95
+
+		// Right Panel Top
+         1.5,  0.1,  0.5, //v96
+         1.5,  0.1, -0.5, //v97
+		 2.5,  0.1, -0.5, //v98
+		 2.5,  0.1,  0.5, //v99
+
+        // Right Panel Bottom
+         1.5, -0.1,  0.5, //v100
+         1.5, -0.1, -0.5, //v101
+		 2.5, -0.1, -0.5, //v102
+		 2.5, -0.1,  0.5, //v103
+		 
+		// Front Rod Left
+		-0.1,  0.1, -1.0, //v104
+		-0.1,  0.1, -1.4, //v105
+		-0.1, -0.1, -1.4, //v106
+		-0.1, -0.1, -1.0, //v107
+		
+		// Front Rod Right
+		 0.1,  0.1, -1.0, //v108
+		 0.1,  0.1, -1.4, //v109
+		 0.1, -0.1, -1.4, //v110
+		 0.1, -0.1, -1.0, //v111
+		
+		// Front Rod Top
+		-0.1,  0.1, -1.0, //v112
+		-0.1,  0.1, -1.4, //v113
+		 0.1,  0.1, -1.4, //v114
+		 0.1,  0.1, -1.0, //v115
+		
+		// Front Rod Bottom
+		-0.1, -0.1, -1.0, //v116
+		-0.1, -0.1, -1.4, //v117
+		 0.1, -0.1, -1.4, //v118
+		 0.1, -0.1, -1.0, //v119
+  	];
+	var totalFaces = 30;		// Sattelite dish doesn't count.
+	var dishVertexMax = 16; 	// This is the max amount of vertices the dish can have. The center vertex doesn't count.
+	for (var dishVertexCount = 0; dishVertexCount < dishVertexMax; dishVertexCount++) {	// Loop for calculating vertices of triangle polygons.
+		satelliteVertexPosition.push(0);
+		satelliteVertexPosition.push(0);
+		satelliteVertexPosition.push(-1.4);
+		
+		satelliteVertexPosition.push(2*Math.sin(2*dishVertexCount*Math.PI/dishVertexMax));
+		satelliteVertexPosition.push(2*Math.cos(2*dishVertexCount*Math.PI/dishVertexMax));
+		satelliteVertexPosition.push(-2.0);
+		
+		satelliteVertexPosition.push(2*Math.sin(2*(dishVertexCount+1)*Math.PI/dishVertexMax));
+		satelliteVertexPosition.push(2*Math.cos(2*(dishVertexCount+1)*Math.PI/dishVertexMax));
+		satelliteVertexPosition.push(-2.0);
+	}
+	
+	gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(satelliteVertexPosition),
+					gl.STATIC_DRAW);
+	pwgl.SATELLITE_VERTEX_POS_BUF_ITEM_SIZE = 3;
+	pwgl.SATELLITE_VERTEX_POS_BUF_NUM_ITEMS = (totalFaces*4) + (dishVertexMax*3);
+
+	// Setup buffer with index.
+	pwgl.satelliteVertexIndexBuffer = gl.createBuffer();
+	gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.satelliteVertexIndexBuffer);
+  
+	var satelliteVertexIndices = [];
+	for (var faceCount = 0; faceCount < totalFaces; faceCount++) {
+		satelliteVertexIndices.push(faceCount*4);
+		satelliteVertexIndices.push((faceCount*4)+1);
+		satelliteVertexIndices.push((faceCount*4)+2);
+		
+		satelliteVertexIndices.push(faceCount*4);
+		satelliteVertexIndices.push((faceCount*4)+2);
+		satelliteVertexIndices.push((faceCount*4)+3);
+	}
+	for (var faceCount = 0; faceCount < (dishVertexMax*3); faceCount++) {
+		satelliteVertexIndices.push((totalFaces*4)+(faceCount));
+	}
+
+	gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new 
+		Uint16Array(satelliteVertexIndices), gl.STATIC_DRAW);
+	pwgl.SATELLITE_VERTEX_INDEX_BUF_ITEM_SIZE = 1;
+	pwgl.SATELLITE_VERTEX_INDEX_BUF_NUM_ITEMS = (totalFaces*6) + (dishVertexMax*3);
+
+	// Setup buffer with texture coordinates.
+	pwgl.satelliteVertexTextureCoordinateBuffer = gl.createBuffer();
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.satelliteVertexTextureCoordinateBuffer);
+	var textureCoordinates = [];
+	for (var textureCount = 0; textureCount < (totalFaces + dishVertexMax); textureCount++) {	// Loop for calculating texture coordinates.
+		var texturex = 0.0, texturey = 0.0;
+		if (textureCount == 1) {
+			texturex = 0.0;
+			texturey = 1.0;
+		} else if (textureCount < 6) {
+			texturex = 1.0;
+			texturey = 0.0;
+		} else if (textureCount >= 13 && textureCount < 25) {
+			texturex = 0.0;
+			texturey = 0.0;
+		} else {
+			texturex = 1.0;
+			texturey = 1.0;
+		}
+		textureCoordinates.push(texturex);
+		textureCoordinates.push(texturey);
+		
+		textureCoordinates.push(texturex);
+		textureCoordinates.push(0.5);
+		
+		textureCoordinates.push(0.5);
+		textureCoordinates.push(texturey);
+		
+		if (textureCount < totalFaces) {
+			textureCoordinates.push(0.5);
+			textureCoordinates.push(0.5);
+		}
+		
+	}
+	
+	gl.bufferData(gl.ARRAY_BUFFER, new 
+		Float32Array(textureCoordinates),gl.STATIC_DRAW);
+	pwgl.SATELLITE_VERTEX_TEX_COORD_BUF_ITEM_SIZE = 2;
+	pwgl.SATELLITE_VERTEX_TEX_COORD_BUF_NUM_ITEMS = (totalFaces*4) + (dishVertexMax*3);
+
+	// Specify normals to be able to do lighting calculations.
+	pwgl.satelliteVertexNormalBuffer = gl.createBuffer();
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.satelliteVertexNormalBuffer);
+	var satelliteVertexNormals = [];
+	var xNormal = 0.0, yNormal = 0.0, zNormal = 0.0;
+	for (var normalCount = 0; normalCount < (totalFaces + dishVertexMax); normalCount++) {
+		if (normalCount >= 6 || normalCount < 14) {
+			if (normalCount % 4 == 0) {
+				zNormal = 1.0;
+			} else if (normalCount % 4 == 1) {
+				zNormal = -1.0;
+			} else if (normalCount % 4 == 2) {
+				yNormal = 1.0;
+			} else {
+				yNormal = -1.0;
+			}
+		} else if (normalCount >= 26) {
+			if (normalCount % 4 == 0) {
+				xNormal = -1.0;
+			} else if (normalCount % 4 == 1) {
+				xNormal = 1.0;
+			} else if (normalCount % 4 == 2) {
+				yNormal = 1.0;
+			} else {
+				yNormal = -1.0;
+			}
+		} else {
+			if (normalCount % 6 == 0) {
+				zNormal = 1.0;
+			} else if (normalCount % 6 == 1) {
+				zNormal = -1.0;
+			} else if (normalCount % 6 == 2) {
+				xNormal = -1.0;
+			} else if (normalCount % 6 == 3) {
+				xNormal = 1.0;
+			} else if (normalCount % 6 == 4) {
+				yNormal = 1.0;
+			} else {
+				yNormal = -1.0;
+			}
+		}
+		if (normalCount < totalFaces) {
+			for (var i = 0; i < 4; i++) {
+				satelliteVertexNormals.push(xNormal);
+				satelliteVertexNormals.push(yNormal);
+				satelliteVertexNormals.push(zNormal);
+			}
+		} else {
+			satelliteVertexNormals.push(0.0);
+			satelliteVertexNormals.push(0.0);
+			satelliteVertexNormals.push(-1.0);
+			
+			satelliteVertexNormals.push(Math.sin(2*dishVertexCount*Math.PI/dishVertexMax));
+			satelliteVertexNormals.push(Math.cos(2*dishVertexCount*Math.PI/dishVertexMax));
+			satelliteVertexNormals.push(-0.6/Math.sqrt(Math.pow(-0.6, 2) + Math.pow(2, 2)));
+			
+			satelliteVertexNormals.push(Math.sin(2*(dishVertexCount+1)*Math.PI/dishVertexMax));
+			satelliteVertexNormals.push(Math.cos(2*(dishVertexCount+1)*Math.PI/dishVertexMax));
+			satelliteVertexNormals.push(-0.6/Math.sqrt(Math.pow(-0.6, 2) + Math.pow(2, 2)));
+		}
+	}
+
+	gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(satelliteVertexNormals),
+		gl.STATIC_DRAW);
+	pwgl.SATELLITE_VERTEX_NORMAL_BUF_ITEM_SIZE = 3;
+	pwgl.SATELLITE_VERTEX_NORMAL_BUF_NUM_ITEMS = (totalFaces*4 + dishVertexMax*3);
+}
+
+function setupSphereBuffers() {
+	pwgl.sphereVertexPositionBuffer = gl.createBuffer();
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexPositionBuffer);
+	var sphereVertexPosition = [];
+	var latLines = 36, longLines = 36
+	for (var latNumber = 0; latNumber < latLines; latNumber++) {			// This is the loop using the number of latitude lines, going from 90N to 90S.
+		for (var longNumber = 0; longNumber < longLines; longNumber++) {	// This is loop using the number of longitude lines, going from 180E to 180W, going clockwise.
+			if (latNumber != (latLines-1)) {
+				sphereVertexPosition.push(10*Math.sin(latNumber*Math.PI/latLines)*Math.cos(longNumber*Math.PI/(longLines/2)));				// First vertex x
+				sphereVertexPosition.push(10*Math.cos(latNumber*Math.PI/latLines));															// First vertex y
+				sphereVertexPosition.push(10*Math.sin(latNumber*Math.PI/latLines)*Math.sin(longNumber*Math.PI/(longLines/2)));				// First vertex z
+			
+				sphereVertexPosition.push(10*Math.sin((latNumber+1)*Math.PI/latLines)*Math.cos(longNumber*Math.PI/(longLines/2)));			// Second vertex x
+				sphereVertexPosition.push(10*Math.cos((latNumber+1)*Math.PI/latLines));														// Second vertex y
+				sphereVertexPosition.push(10*Math.sin((latNumber+1)*Math.PI/latLines)*Math.sin(longNumber*Math.PI/(longLines/2)));			// Second vertex z
+			
+				sphereVertexPosition.push(10*Math.sin((latNumber+1)*Math.PI/latLines)*Math.cos((longNumber+1)*Math.PI/(longLines/2)));		// Third vertex x
+				sphereVertexPosition.push(10*Math.cos((latNumber+1)*Math.PI/latLines));														// Third vertex y
+				sphereVertexPosition.push(10*Math.sin((latNumber+1)*Math.PI/latLines)*Math.sin((longNumber+1)*Math.PI/(longLines/2)));		// Third vertex z
+			
+				if (latNumber != 0) {	// Latitude lines that have polygons not connect to the poles have a second triangular polygon drawn
+										// so that the polygon becomes a quadrilateral.
+					sphereVertexPosition.push(10*Math.sin(latNumber*Math.PI/latLines)*Math.cos(longNumber*Math.PI/(longLines/2)));			// First vertex x
+					sphereVertexPosition.push(10*Math.cos(latNumber*Math.PI/latLines));														// First vertex y
+					sphereVertexPosition.push(10*Math.sin(latNumber*Math.PI/latLines)*Math.sin(longNumber*Math.PI/(longLines/2)));			// First vertex z
+			
+					sphereVertexPosition.push(10*Math.sin(latNumber*Math.PI/latLines)*Math.cos((longNumber+1)*Math.PI/(longLines/2)));		// Second vertex x
+					sphereVertexPosition.push(10*Math.cos(latNumber*Math.PI/latLines));														// Second vertex y
+					sphereVertexPosition.push(10*Math.sin(latNumber*Math.PI/latLines)*Math.sin((longNumber+1)*Math.PI/(longLines/2)));		// Second vertex z
+			
+					sphereVertexPosition.push(10*Math.sin((latNumber+1)*Math.PI/latLines)*Math.cos((longNumber+1)*Math.PI/(longLines/2)));	// Third vertex x
+					sphereVertexPosition.push(10*Math.cos((latNumber+1)*Math.PI/latLines));													// Third vertex y
+					sphereVertexPosition.push(10*Math.sin((latNumber+1)*Math.PI/latLines)*Math.sin((longNumber+1)*Math.PI/(longLines/2)));	// Third vertex z
+				}
+			} else {
+				sphereVertexPosition.push(10*Math.sin(latNumber*Math.PI/latLines)*Math.cos(longNumber*Math.PI/(longLines/2)));				// First vertex x
+				sphereVertexPosition.push(10*Math.cos(latNumber*Math.PI/latLines));															// First vertex y
+				sphereVertexPosition.push(10*Math.sin(latNumber*Math.PI/latLines)*Math.sin(longNumber*Math.PI/(longLines/2)));				// First vertex z
+			
+				sphereVertexPosition.push(10*Math.sin((latNumber+1)*Math.PI/latLines)*Math.cos(longNumber*Math.PI/(longLines/2)));			// Second vertex x
+				sphereVertexPosition.push(10*Math.cos((latNumber+1)*Math.PI/latLines));														// Second vertex y
+				sphereVertexPosition.push(10*Math.sin((latNumber+1)*Math.PI/latLines)*Math.sin(longNumber*Math.PI/(longLines/2)));			// Second vertex z
+			
+				sphereVertexPosition.push(10*Math.sin(latNumber*Math.PI/latLines)*Math.cos((longNumber+1)*Math.PI/(longLines/2)));			// Third vertex x
+				sphereVertexPosition.push(10*Math.cos(latNumber*Math.PI/latLines));															// Third vertex y
+				sphereVertexPosition.push(10*Math.sin(latNumber*Math.PI/latLines)*Math.sin((longNumber+1)*Math.PI/(longLines/2)));			// Third vertex z
+			}
+		}
+	}
+	var vertexCount = (((latLines - 2)*(longLines)*6) + (longLines*2)*3)
+  
+	gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphereVertexPosition),
+					gl.STATIC_DRAW);
+	pwgl.SPHERE_VERTEX_POS_BUF_ITEM_SIZE = 3;
+	pwgl.SPHERE_VERTEX_POS_BUF_NUM_ITEMS = vertexCount;
+
+	// Setup buffer with index.
+	pwgl.sphereVertexIndexBuffer = gl.createBuffer();
+	gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.sphereVertexIndexBuffer);
+  
+	var sphereVertexIndices = [];
+	for (var indexCount = 0; indexCount < vertexCount; indexCount++) {
+		sphereVertexIndices.push(indexCount);
+	}
+
+	gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new 
+		Uint16Array(sphereVertexIndices), gl.STATIC_DRAW);
+	pwgl.SPHERE_VERTEX_INDEX_BUF_ITEM_SIZE = 1;
+	pwgl.SPHERE_VERTEX_INDEX_BUF_NUM_ITEMS = vertexCount;
+
+	// Setup buffer with texture coordinates.
+	pwgl.sphereVertexTextureCoordinateBuffer = gl.createBuffer();
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexTextureCoordinateBuffer);
+	var textureCoordinates = [];
+	for (var texCoordCountx = 0; texCoordCountx < latLines; texCoordCountx++) {
+		for (var texCoordCounty = 0; texCoordCounty < longLines; texCoordCounty++) {
+			if (texCoordCountx != (latLines-1)) {
+				textureCoordinates.push(1-(texCoordCounty/longLines));
+				textureCoordinates.push(1-(texCoordCountx/latLines));
+			
+				textureCoordinates.push(1-(texCoordCounty/longLines));
+				textureCoordinates.push(1-((texCoordCountx+1)/latLines));
+			
+				textureCoordinates.push(1-((texCoordCounty+1)/longLines));
+				textureCoordinates.push(1-((texCoordCountx+1)/latLines));
+				
+				if (texCoordCountx != 0) {
+					textureCoordinates.push(1-(texCoordCounty/longLines));
+					textureCoordinates.push(1-(texCoordCountx/latLines));
+			
+					textureCoordinates.push(1-((texCoordCounty+1)/longLines));
+					textureCoordinates.push(1-(texCoordCountx/latLines));
+			
+					textureCoordinates.push(1-((texCoordCounty+1)/longLines));
+					textureCoordinates.push(1-((texCoordCountx+1)/latLines));
+				}
+			} else {
+				textureCoordinates.push(1-(texCoordCounty/longLines));
+				textureCoordinates.push(1-(texCoordCountx/latLines));
+			
+				textureCoordinates.push(1-(texCoordCounty/longLines));
+				textureCoordinates.push(1-((texCoordCountx+1)/latLines));
+			
+				textureCoordinates.push(1-((texCoordCounty+1)/longLines));
+				textureCoordinates.push(1-(texCoordCountx/latLines));
+			}
+		}
+	}
+  
+	gl.bufferData(gl.ARRAY_BUFFER, new 
+		Float32Array(textureCoordinates),gl.STATIC_DRAW);
+	pwgl.SPHERE_VERTEX_TEX_COORD_BUF_ITEM_SIZE = 2;
+	pwgl.SPHERE_VERTEX_TEX_COORD_BUF_NUM_ITEMS = 1;
+
+	// Specify normals to be able to do lighting calculations.
+	pwgl.sphereVertexNormalBuffer = gl.createBuffer();
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexNormalBuffer);
+	var sphereVertexNormals = [];
+	for (var normalCountx ; normalCountx < latLines; normalCountx++) {
+		for (var normalCounty; normalCounty < longLines; normalCounty++) {
+			if (normalCountx != (latLines-1)) {
+				sphereVertexNormals.push(Math.sin(normalCountx*Math.PI/latLines)*Math.cos(normalCounty*Math.PI/(longLines/2)));
+				sphereVertexNormals.push(Math.cos(normalCountx*Math.PI/latLines));
+				sphereVertexNormals.push(Math.sin(normalCountx*Math.PI/latLines)*Math.sin(normalCounty*Math.PI/(longLines/2)));
+				
+				sphereVertexNormals.push(Math.sin((normalCountx+1)*Math.PI/latLines)*Math.cos(normalCounty*Math.PI/(longLines/2)));
+				sphereVertexNormals.push(Math.cos((normalCountx+1)*Math.PI/latLines));
+				sphereVertexNormals.push(Math.sin((normalCountx+1)*Math.PI/latLines)*Math.sin(normalCounty*Math.PI/(longLines/2)));
+				
+				sphereVertexNormals.push(Math.sin((normalCountx+1)*Math.PI/latLines)*Math.cos((normalCounty+1)*Math.PI/(longLines/2)));
+				sphereVertexNormals.push(Math.cos((normalCountx+1)*Math.PI/latLines));
+				sphereVertexNormals.push(Math.sin((normalCountx+1)*Math.PI/latLines)*Math.sin((normalCounty+1)*Math.PI/(longLines/2)));
+				
+				if (normalCountx != 0) {
+					sphereVertexNormals.push(Math.sin(normalCountx*Math.PI/latLines)*Math.cos(normalCounty*Math.PI/(longLines/2)));
+					sphereVertexNormals.push(Math.cos(normalCountx*Math.PI/latLines));
+					sphereVertexNormals.push(Math.sin(normalCountx*Math.PI/latLines)*Math.sin(normalCounty*Math.PI/(longLines/2)));
+				
+					sphereVertexNormals.push(Math.sin(normalCountx*Math.PI/latLines)*Math.cos((normalCounty+1)*Math.PI/(longLines/2)));
+					sphereVertexNormals.push(Math.cos(normalCountx*Math.PI/latLines));
+					sphereVertexNormals.push(Math.sin(normalCountx*Math.PI/latLines)*Math.sin((normalCounty+1)*Math.PI/(longLines/2)));
+				
+					sphereVertexNormals.push(Math.sin((normalCountx+1)*Math.PI/latLines)*Math.cos((normalCounty+1)*Math.PI/(longLines/2)));
+					sphereVertexNormals.push(Math.cos((normalCountx+1)*Math.PI/latLines));
+					sphereVertexNormals.push(Math.sin((normalCountx+1)*Math.PI/latLines)*Math.sin((normalCounty+1)*Math.PI/(longLines/2)));
+				}
+			} else {
+				sphereVertexNormals.push(Math.sin(normalCountx*Math.PI/latLines)*Math.cos(normalCounty*Math.PI/(longLines/2)));
+				sphereVertexNormals.push(Math.cos(normalCountx*Math.PI/latLines));
+				sphereVertexNormals.push(Math.sin(normalCountx*Math.PI/latLines)*Math.sin(normalCounty*Math.PI/(longLines/2)));
+				
+				sphereVertexNormals.push(Math.sin((normalCountx+1)*Math.PI/latLines)*Math.cos(normalCounty*Math.PI/(longLines/2)));
+				sphereVertexNormals.push(Math.cos((normalCountx+1)*Math.PI/latLines));
+				sphereVertexNormals.push(Math.sin((normalCountx+1)*Math.PI/latLines)*Math.sin(normalCounty*Math.PI/(longLines/2)));
+				
+				sphereVertexNormals.push(Math.sin(normalCountx*Math.PI/latLines)*Math.cos((normalCounty+1)*Math.PI/(longLines/2)));
+				sphereVertexNormals.push(Math.cos(normalCountx*Math.PI/latLines));
+				sphereVertexNormals.push(Math.sin(normalCountx*Math.PI/latLines)*Math.sin((normalCounty+1)*Math.PI/(longLines/2)));
+			}
+		}
+	}
+	sphereVertexNormals.push(0.0);
+	sphereVertexNormals.push(0.0);
+	sphereVertexNormals.push(0.0);
+
+	gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphereVertexNormals),
+		gl.STATIC_DRAW);
+	pwgl.SPHERE_VERTEX_NORMAL_BUF_ITEM_SIZE = 3;
+	pwgl.SPHERE_VERTEX_NORMAL_BUF_NUM_ITEMS = vertexCount;
+}
+
+function setupTextures() {
+	// Texture for the earth.
+	pwgl.earthTexture = gl.createTexture();
+	loadImageForTexture("earth.jpg", pwgl.earthTexture);
+	
+	// Texture for the satellite.
+	pwgl.satelliteTexture = gl.createTexture();
+	loadImageForTexture("satellite.png", pwgl.satelliteTexture);
+}
+
+function loadImageForTexture(url, texture) {
+	var image = new Image();
+	image.onload = function() {
+		pwgl.ongoingImageLoads.splice(pwgl.ongoingImageLoads.indexOf(image), 1);
+    
+		textureFinishedLoading(image, texture);
+	}
+	pwgl.ongoingImageLoads.push(image);
+	image.crossOrigin = "anonymous";
+	image.src = url;
+}
+
+function textureFinishedLoading(image, texture) {
+	gl.bindTexture(gl.TEXTURE_2D, texture);
+	gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  
+	gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, 
+                			image);
+                
+	gl.generateMipmap(gl.TEXTURE_2D);
+  
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
+	gl.bindTexture(gl.TEXTURE_2D, null); 
+}
+
+function setupBuffers() {
+	setupSatelliteBuffers();
+	setupSphereBuffers();
+}
+
+
+function setupLights() {
+	// Play with light position and orientation to see its effect.
+	gl.uniform3fv(pwgl.uniformLightPositionLoc, [0.0, 30.0, 50.0]);
+	gl.uniform3fv(pwgl.uniformSpotDirectionLoc, [0.0, 0.0, 0.0]); 
+	gl.uniform3fv(pwgl.uniformAmbientLightColorLoc, [0.5, 0.5, 0.5]);
+	gl.uniform3fv(pwgl.uniformDiffuseLightColorLoc, [0.6, 0.6, 0.6]);
+	gl.uniform3fv(pwgl.uniformSpecularLightColorLoc, [0.7, 0.7, 0.7]);
+}
+
+function uploadNormalMatrixToShader() {
+	var normalMatrix = mat3.create();
+	mat4.toInverseMat3(pwgl.modelViewMatrix, normalMatrix);
+	mat3.transpose(normalMatrix);
+	gl.uniformMatrix3fv(pwgl.uniformNormalMatrixLoc, false, normalMatrix);
+
+}
+
+function uploadModelViewMatrixToShader() {
+	gl.uniformMatrix4fv(pwgl.uniformMVMatrixLoc, false, 
+	pwgl.modelViewMatrix);
+}
+
+function uploadProjectionMatrixToShader() {
+	gl.uniformMatrix4fv(pwgl.uniformProjMatrixLoc, false, 
+	pwgl.projectionMatrix);
+}
+
+function drawSatellite() {
+	// Bind position buffer.
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.satelliteVertexPositionBuffer);
+	gl.vertexAttribPointer(pwgl.vertexPositionAttributeLoc, 
+               		pwgl.SATELLITE_VERTEX_POS_BUF_ITEM_SIZE, 
+					gl.FLOAT, false, 0, 0);
+
+	// Bind normal buffer.
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.satelliteVertexNormalBuffer);
+	gl.vertexAttribPointer(pwgl.vertexNormalAttributeLoc, 
+						pwgl.SATELLITE_VERTEX_NORMAL_BUF_ITEM_SIZE,
+						gl.FLOAT, false, 0, 0);
+						
+	// Bind texture coordinate buffer.
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.satelliteVertexTextureCoordinateBuffer);
+	gl.vertexAttribPointer(pwgl.vertexTextureAttributeLoc,
+						pwgl.SATELLITE_VERTEX_TEX_COORD_BUF_ITEM_SIZE, 
+						gl.FLOAT, false, 0, 0);
+	gl.activeTexture(gl.TEXTURE0);
+	gl.bindTexture(gl.TEXTURE_2D, pwgl.satelliteTexture);
+	
+	// Bind index buffer and draw satellite.
+	gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.satelliteVertexIndexBuffer);
+	gl.drawElements(gl.TRIANGLES, pwgl.SATELLITE_VERTEX_INDEX_BUF_NUM_ITEMS,
+						gl.UNSIGNED_SHORT, 0);
+}
+
+function drawEarth(){
+	// Bind position buffer.
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexPositionBuffer);
+	gl.vertexAttribPointer(pwgl.vertexPositionAttributeLoc, 
+               		pwgl.SPHERE_VERTEX_POS_BUF_ITEM_SIZE, 
+					gl.FLOAT, false, 0, 0);
+
+	// Bind normal buffer.
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexNormalBuffer);
+	gl.vertexAttribPointer(pwgl.vertexNormalAttributeLoc, 
+						pwgl.SPHERE_VERTEX_NORMAL_BUF_ITEM_SIZE,
+						gl.FLOAT, false, 0, 0);
+
+	// bind texture coordinate buffer.
+	gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexTextureCoordinateBuffer);
+	gl.vertexAttribPointer(pwgl.vertexTextureAttributeLoc,
+						pwgl.SPHERE_VERTEX_TEX_COORD_BUF_ITEM_SIZE, 
+						gl.FLOAT, false, 0, 0);
+	gl.activeTexture(gl.TEXTURE0);
+	gl.bindTexture(gl.TEXTURE_2D, pwgl.earthTexture);
+
+	// Bind index buffer and draw sphere.
+	gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.sphereVertexIndexBuffer);
+	gl.drawElements(gl.TRIANGLES, pwgl.SPHERE_VERTEX_INDEX_BUF_NUM_ITEMS,
+						gl.UNSIGNED_SHORT, 0);  
+}
+
+function draw() { 
+	pwgl.requestId = requestAnimFrame(draw);
+  
+	var currentTime = Date.now();
+  
+
+	handlePressedDownKeys();
+
+	// Update FPS if a second or more has passed since last FPS update.
+	if(currentTime - pwgl.previousFrameTimeStamp >= 1000) {
+		pwgl.fpsCounter.innerHTML = pwgl.nbrOfFramesForFPS;
+		pwgl.nbrOfFramesForFPS = 0;
+		pwgl.previousFrameTimeStamp = currentTime;                    
+	} 
+
+	//console.log("1   xRot= "+xRot+"    yRot="+yRot+"  t= "+transl);
+	mat4.translate(pwgl.modelViewMatrix, [transX, transY, transZ], 
+					pwgl.modelViewMatrix);
+	mat4.rotateX(pwgl.modelViewMatrix, xRot/50, pwgl.modelViewMatrix);
+	mat4.rotateY(pwgl.modelViewMatrix, yRot/50, pwgl.modelViewMatrix);
+
+	yRot = xRot = zRot =transX=transY=transZ=0;
+
+	uploadModelViewMatrixToShader();
+	uploadProjectionMatrixToShader();
+	uploadNormalMatrixToShader();
+	gl.uniform1i(pwgl.uniformSamplerLoc, 0);
+
+	gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+	gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+	// Draw earth.
+	pushModelViewMatrix();
+	if (currentTime === undefined) {
+		currentTime = Date.now();
+	}
+
+	if (pwgl.animationStartTime === undefined) {
+		pwgl.animationStartTime = currentTime;
+	}  
+
+	// Update the position of the earth.   
+	pwgl.angleEarth = (currentTime - pwgl.animationStartTime)/36000*2*Math.PI % 
+				(2*Math.PI);
+	mat4.translate(pwgl.modelViewMatrix, [0.0, 0.0, 0.0], 
+					pwgl.modelViewMatrix);
+	mat4.rotateY(pwgl.modelViewMatrix, [pwgl.angleEarth], pwgl.modelViewMatrix);
+	uploadModelViewMatrixToShader();
+	uploadNormalMatrixToShader();
+	drawEarth();
+	popModelViewMatrix();
+
+	// Calculate the position for the satellite that is initially 
+	// on top of the table but will then be moved during animation.
+	pushModelViewMatrix();
+	if (currentTime === undefined) {
+		currentTime = Date.now();
+	}
+
+	if (pwgl.animationStartTime === undefined) {
+		pwgl.animationStartTime = currentTime;
+	}  
+
+	// Update the position of the satellite.
+	if (pwgl.y < 5) {
+		pwgl.y = 2.7 + (currentTime - pwgl.animationStartTime)/3000 * 
+					(5.0 - 2.7);
+	} else {       
+		pwgl.angleSatellite =  pwgl.speed*(currentTime - pwgl.animationStartTime)/1800*2*Math.PI % 
+				(2*Math.PI);
+		pwgl.x = Math.cos(pwgl.angleSatellite) * pwgl.circleRadius;
+		pwgl.z = Math.sin(pwgl.angleSatellite) * pwgl.circleRadius;
+	}
+
+	mat4.translate(pwgl.modelViewMatrix, [pwgl.x, pwgl.y, pwgl.z], 
+	pwgl.modelViewMatrix);
+	mat4.rotateY(pwgl.modelViewMatrix, [(Math.PI/2) - (pwgl.angleSatellite)], pwgl.modelViewMatrix);
+	mat4.scale(pwgl.modelViewMatrix, [0.5, 0.5, 0.5], pwgl.modelViewMatrix);
+	uploadModelViewMatrixToShader();
+	uploadNormalMatrixToShader();
+	drawSatellite();
+	popModelViewMatrix();
+
+	// Update number of drawn frames to be able to count fps.
+	pwgl.nbrOfFramesForFPS++;
+}
+
+function handleContextLost(event) {
+	event.preventDefault();
+	cancelRequestAnimFrame(pwgl.requestId);
+	// Ignore all ongoing image loads by removing their onload handler.
+	for (var i = 0; i < pwgl.ongoingImageLoads.length; i++) {
+		pwgl.ongoingImageLoads[i].onload = undefined;
+	}
+	pwgl.ongoingImageLoads = [];
+}
+
+function init() {
+	// Initialization that is performed during first startup and when the
+	// event webglcontextrestored is received is included in this function.
+	setupShaders(); 
+	setupBuffers(); 
+	setupLights(); 
+	setupTextures();
+	gl.clearColor(0.0, 0.0, 0.0, 1.0);
+	gl.enable(gl.DEPTH_TEST);
+
+	// Initialize some varibles for the rotating earth and moving satellite.
+	pwgl.x = 0.0;
+	pwgl.y = 10.0;
+	pwgl.z = 0.0;
+	pwgl.speed = 1.0;
+	pwgl.circleRadius = 15.0;
+	pwgl.angleSatellite = 0;
+	pwgl.angleEarth = 0;
+
+	// Initialize some variables related to the animation.
+	pwgl.animationStartTime = undefined;
+	pwgl.nbrOfFramesForFPS = 0;
+	pwgl.previousFrameTimeStamp = Date.now();
+
+
+	mat4.perspective(60, gl.viewportWidth / gl.viewportHeight, 
+		1, 100.0, pwgl.projectionMatrix);
+	mat4.identity(pwgl.modelViewMatrix);
+	mat4.lookAt([20, 24, 20],[0, 0, 0], [0, 1,0], pwgl.modelViewMatrix);
+}
+
+function handleContextRestored(event) {
+	init();
+	pwgl.requestId = requestAnimFrame(draw,canvas);
+}
+
+function handleKeyDown(event) {
+	pwgl.listOfPressedKeys[event.keyCode] = true;
+}
+
+function handleKeyUp(event) {
+	pwgl.listOfPressedKeys[event.keyCode] = false;
+}
+
+function handlePressedDownKeys() {
+	if (pwgl.listOfPressedKeys[37]) {
+		// Arrow up, increase radius of circle.
+		pwgl.circleRadius += 0.1;
+	}
+
+	if (pwgl.listOfPressedKeys[38]) {
+		// Arrow up, increase speed of satellite.
+		pwgl.speed += 0.1;
+	}
+
+	if (pwgl.listOfPressedKeys[39]) {
+		// Arrow down, decrease radius of circle.
+		pwgl.circleRadius -= 0.1;
+		if (pwgl.circleRadius < 0) {
+			pwgl.circleRadius = 0;
+		}
+	}
+	
+	if (pwgl.listOfPressedKeys[40]) {
+		// Arrow down, decrease speed of satellite.
+		pwgl.speed -= 0.1;
+		if (pwgl.speed < 0) {
+			pwgl.speed = 0;
+		}
+	}
+}
+
+function startup() {
+	canvas = document.getElementById("myGLCanvas");
+	canvas = WebGLDebugUtils.makeLostContextSimulatingCanvas(canvas);
+	canvas.addEventListener('webglcontextlost', handleContextLost, false);
+	canvas.addEventListener('webglcontextrestored', handleContextRestored, 
+		false);
+	document.addEventListener('keydown', handleKeyDown, false);
+	document.addEventListener('keyup', handleKeyUp, false);
+	canvas.addEventListener('mousemove', mymousemove, false);
+	canvas.addEventListener('mousedown', mymousedown, false);
+	canvas.addEventListener('mouseup', mymouseup, false);
+	canvas.addEventListener('mousewheel', wheelHandler, false);
+	canvas.addEventListener('DOMMouseScroll', wheelHandler, false);
+  
+	gl = createGLContext(canvas);
+
+	init();
+
+	pwgl.fpsCounter = document.getElementById("fps");
+
+	// Draw the complete scene.
+	draw();
+}
+
+function mymousedown( ev ){
+	drag  = 1;
+	xOffs = ev.clientX;  
+	yOffs = ev.clientY;
+}
+
+function mymouseup( ev ){
+	drag  = 0;
+}
+
+function mymousemove( ev ){
+	if ( drag == 0 ) return;
+	if ( ev.shiftKey ) {
+		transX = (ev.clientY - yOffs)/10;
+		//zRot = (xOffs - ev.clientX)*.3; 
+	} else if (ev.altKey) {
+		transY = -(ev.clientY - yOffs)/10;
+	} else {
+		yRot = - xOffs + ev.clientX;  
+		xRot = - yOffs + ev.clientY; 
+	}
+	xOffs = ev.clientX;   
+	yOffs = ev.clientY;
+	//console.log("xRot= "+xRot+"    yRot="+yRot+"   trans=  "+transl);
+	//console.log("xOff= "+xOffs+"    yOff="+yOffs);
+}
+
+function wheelHandler(ev) {
+	if (ev.altKey) transY = -ev.detail/10;
+	else transZ =ev.detail/10;
+	//console.log("delta ="+ev.detail);
+	ev.preventDefault();
+}
+
+</script>
+
+</head>
+<body onload="startup();">
+<canvas id="myGLCanvas" width="500" height="500"></canvas>
+<div id="fps-counter"> FPS: <span id="fps">--</span></div>
+</body>
+</html>
